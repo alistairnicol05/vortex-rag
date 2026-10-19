@@ -12,3 +12,4 @@ data/papers/*.part
 # data/index/ (chunks + vectors) is needed for deployment but contains paper text: see the guide before committing it.
 data/index/
 results/*.json
+smoke.py

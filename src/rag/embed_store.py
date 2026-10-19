@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-import chromadb
+import chromadb  # the vector database
 import numpy as np
 
 from .config import Settings, get_settings
@@ -21,28 +21,30 @@ from .embeddings import Embedder, FakeEmbedder, GeminiEmbedder
 from .ingest import Chunk, ingest_dir, read_chunks, write_chunks
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True)  # one search result
 class Hit:
-    id: str
-    source: str
+    id: str  # chunk ID, e.g. "P01_Kristiansen2016.pdf:p3:c1"
+    source: str  # PDF file name
     page: int
     text: str
     score: float  # cosine similarity (1 - cosine distance)
 
 
 def save_index(index_dir: Path, chunks: list[Chunk], vectors: np.ndarray, model: str) -> None:
-    write_chunks(chunks, index_dir / "chunks.jsonl")
-    np.save(index_dir / "embeddings.npy", vectors)
-    (index_dir / "meta.json").write_text(
+    """Write the index as 3 plain files, so it can be reloaded without re-embedding (re-paying)."""
+    write_chunks(chunks, index_dir / "chunks.jsonl")  # the text + file/page of every chunk
+    np.save(index_dir / "embeddings.npy", vectors)  # the vectors, row i belongs to chunk i
+    (index_dir / "meta.json").write_text(  # which model made the vectors, so mismatches can be caught
         json.dumps({"embed_model": model, "dim": int(vectors.shape[1]), "n": len(chunks)}), encoding="utf-8"
     )
 
 
 def load_index(index_dir: Path) -> tuple[list[Chunk], np.ndarray, dict]:
+    """Read back the 3 files written by save_index."""
     chunks = read_chunks(index_dir / "chunks.jsonl")
     vectors = np.load(index_dir / "embeddings.npy")
     meta = json.loads((index_dir / "meta.json").read_text(encoding="utf-8"))
-    if len(chunks) != len(vectors):
+    if len(chunks) != len(vectors):  # one vector per chunk, or the pairing is wrong
         raise ValueError("chunks.jsonl and embeddings.npy are out of sync; re-run embed_store")
     return chunks, vectors, meta
 
@@ -51,12 +53,14 @@ class VectorStore:
     """Thin wrapper over one Chroma collection (cosine space)."""
 
     def __init__(self, client: chromadb.ClientAPI, name: str) -> None:
+        # a "collection" is like a table; "cosine" = compare vectors by angle
         self.collection = client.get_or_create_collection(name=name, metadata={"hnsw:space": "cosine"})
 
     def add(self, chunks: list[Chunk], vectors: np.ndarray, batch: int = 500) -> None:
+        """Store chunks with their vectors, 500 at a time."""
         for i in range(0, len(chunks), batch):
             part = chunks[i : i + batch]
-            self.collection.upsert(
+            self.collection.upsert(  # upsert = insert, or overwrite if the ID already exists (safe to re-run)
                 ids=[c.id for c in part],
                 embeddings=vectors[i : i + batch].tolist(),
                 documents=[c.text for c in part],
@@ -64,17 +68,20 @@ class VectorStore:
             )
 
     def query(self, vector: np.ndarray, k: int) -> list[Hit]:
+        """Return the k chunks whose vectors are closest to the question's vector, best first."""
         res = self.collection.query(query_embeddings=[vector.tolist()], n_results=k)
         hits: list[Hit] = []
+        # Chroma returns lists of lists (one per query); [0] = our single query
         for id_, doc, meta, dist in zip(res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0]):
             hits.append(Hit(id=id_, source=meta["source"], page=int(meta["page"]), text=doc, score=1.0 - float(dist)))
         return hits
 
     def count(self) -> int:
-        return self.collection.count()
+        return self.collection.count()  # number of chunks stored
 
 
 def open_persistent(settings: Settings, collection: str | None = None) -> VectorStore:
+    """Chroma saved on disk in ./chroma_db (used on your laptop)."""
     client = chromadb.PersistentClient(path=str(settings.chroma_dir))
     return VectorStore(client, collection or settings.collection)
 
@@ -82,14 +89,15 @@ def open_persistent(settings: Settings, collection: str | None = None) -> Vector
 def open_from_index(index_dir: Path, collection: str = "papers") -> tuple[VectorStore, list[Chunk], dict]:
     """In-memory Chroma rebuilt from the exported index. Used by the web app (no API calls)."""
     chunks, vectors, meta = load_index(index_dir)
-    store = VectorStore(chromadb.EphemeralClient(), collection)
+    store = VectorStore(chromadb.EphemeralClient(), collection)  # Ephemeral = in memory, gone when the app stops
     store.add(chunks, vectors)
     return store, chunks, meta
 
 
 def main() -> None:
+    """Full build: PDFs -> chunks -> vectors -> data/index/ files -> ./chroma_db."""
     s = get_settings()
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser()  # command-line options; defaults come from config.py
     ap.add_argument("--fake", action="store_true", help="use the offline fake embedder")
     ap.add_argument("--collection", default=s.collection)
     ap.add_argument("--size", type=int, default=s.chunk_chars)
@@ -98,17 +106,17 @@ def main() -> None:
     ap.add_argument("--index-dir", type=Path, default=s.index_dir)
     args = ap.parse_args()
 
-    chunks = ingest_dir(args.papers, args.size, args.overlap, s.min_chunk_chars)
+    chunks = ingest_dir(args.papers, args.size, args.overlap, s.min_chunk_chars)  # 1. PDFs -> chunks
     embedder: Embedder = FakeEmbedder() if args.fake else GeminiEmbedder(s)
     print(f"Embedding {len(chunks)} chunks ...")
-    vectors = embedder.embed_documents([c.text for c in chunks])
+    vectors = embedder.embed_documents([c.text for c in chunks])  # 2. chunks -> vectors (costs API calls)
     model = "fake" if args.fake else s.embed_model
-    save_index(args.index_dir, chunks, vectors, model)
+    save_index(args.index_dir, chunks, vectors, model)  # 3. save portable index files
 
-    store = open_persistent(s, args.collection)
+    store = open_persistent(s, args.collection)  # 4. load into the on-disk database
     store.add(chunks, vectors)
     print(f"Chroma collection '{args.collection}' now holds {store.count()} chunks (model={model}).")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # only runs via "python -m rag.embed_store", not when imported
     main()
