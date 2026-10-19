@@ -1,0 +1,16 @@
+# gcloud run deploy --source uses THIS file instead of .gitignore, so data/index/ is uploaded on purpose.
+.git/
+.gitignore
+.env
+.venv/
+.venv-adk/
+__pycache__/
+.pytest_cache/
+chroma_db/
+traces/
+data/papers/
+results/
+tests/
+scripts/
+eval/
+vortex_agent/

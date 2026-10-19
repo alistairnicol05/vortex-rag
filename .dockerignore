@@ -1,0 +1,14 @@
+.env
+.venv/
+.venv-adk/
+.git/
+__pycache__/
+.pytest_cache/
+chroma_db/
+traces/
+data/papers/
+results/
+tests/
+scripts/
+eval/
+vortex_agent/

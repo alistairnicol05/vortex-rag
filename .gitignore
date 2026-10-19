@@ -1,11 +1,14 @@
-.venv/
 .env
+.venv/
+.venv-adk/
 __pycache__/
 *.pyc
 .pytest_cache/
-*.pdf
-papers/
 chroma_db/
 traces/
+# Papers are other people's copyrighted PDFs: never commit them. The list lives in data/papers.csv.
+data/papers/*.pdf
+data/papers/*.part
+# data/index/ (chunks + vectors) is needed for deployment but contains paper text: see the guide before committing it.
+data/index/
 results/*.json
-vortex_agent/.venv/
