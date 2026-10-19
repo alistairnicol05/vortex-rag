@@ -1,0 +1,10 @@
+pymupdf
+google-genai
+chromadb
+rank-bm25
+fastapi
+uvicorn
+python-dotenv
+requests
+matplotlib
+pytest

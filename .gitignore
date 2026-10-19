@@ -1,0 +1,11 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+*.pdf
+papers/
+chroma_db/
+traces/
+results/*.json
+vortex_agent/.venv/
