@@ -19,6 +19,7 @@ import numpy as np
 from .config import Settings, get_settings
 from .embeddings import Embedder, FakeEmbedder, GeminiEmbedder
 from .ingest import Chunk, ingest_dir, read_chunks, write_chunks
+from chromadb.api import ClientAPI  # type hint for the Chroma client
 
 
 @dataclass(frozen=True)  # one search result

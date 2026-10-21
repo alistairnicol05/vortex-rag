@@ -81,7 +81,7 @@ class GeminiEmbedder:
         """Embed paper chunks (tuned for 'text to be searched')."""
         if self._is_v2:
             texts = [f"title: none | text: {t}" for t in texts]
-        return self._embed(texts, "RETRIEVAL_DOCUMENT")
+        return self._embed(texts, "RETRIEVAL_DOCUMENT") # task_type is ignored for v2, but required for v1
 
     def embed_query(self, text: str) -> np.ndarray:
         """Embed a question (tuned for 'text doing the searching')."""

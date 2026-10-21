@@ -20,7 +20,7 @@ class Settings:
     # --- models (verified against ai.google.dev docs on 2026-10-19; re-check before use) ---
     gen_model: str = os.getenv("GEN_MODEL", "gemini-3.1-flash-lite")  # writes the answers
     judge_model: str = os.getenv("JUDGE_MODEL", "gemini-3.8-flash")  # grades the answers (a different model)
-    embed_model: str = os.getenv("EMBED_MODEL", "gemini-embedding-001")  # turns text into vectors
+    embed_model: str = os.getenv("EMBED_MODEL", "gemini-embedding-2")  # turns text into vectors
     embed_dim: int = int(os.getenv("EMBED_DIM", "768"))  # numbers per vector
 
     # --- chunking ---

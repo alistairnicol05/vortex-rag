@@ -16,10 +16,10 @@ PRICES: dict[str, tuple[float, float]] = {
     "gemini-3.6-flash": (0.75, 3.75),
 }
 
-# Embedding price per 1M input tokens: NOT verified from the official page. Left at None on purpose.
+# Embedding price per 1M TEXT input tokens (paid tier). None = not verified from the official page.
 EMBED_PRICE_PER_M: dict[str, float | None] = {
     "gemini-embedding-001": None,
-    "gemini-embedding-2": None,
+    "gemini-embedding-2": 0.20,  # read 2026-10-20
 }
 
 
@@ -29,3 +29,12 @@ def llm_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float | N
         return None
     p_in, p_out = PRICES[model]
     return (input_tokens * p_in + output_tokens * p_out) / 1_000_000
+
+def embed_cost_usd(model: str, input_tokens: int) -> float | None:
+    """Return cost in USD, or None if the model's price is not in the table."""
+    if model not in EMBED_PRICE_PER_M:
+        return None
+    p_in = EMBED_PRICE_PER_M[model]
+    if p_in is None:
+        return None
+    return (input_tokens * p_in) / 1_000_000

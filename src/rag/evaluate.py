@@ -105,6 +105,7 @@ def evaluate_one(pipe: RagPipeline, q: dict, cfg: EvalConfig) -> dict[str, Any]:
         row["rr"] = reciprocal_rank(hits_all, rel, kmax)
         row["source_recall"] = source_recall(hits_all, q["gold"], cfg.k)
     if cfg.judge is not None:
+        judge_costs: list[float | None] = []  # one entry per judge API call
         if q["type"] == "unanswerable":
             row["correctness"] = 2 if ans.refused else 0  # correct behaviour = refuse
             row["faithful"] = None
@@ -112,14 +113,18 @@ def evaluate_one(pipe: RagPipeline, q: dict, cfg: EvalConfig) -> dict[str, Any]:
             if ans.refused:
                 row["correctness"], row["correctness_note"] = 0, "refused"
             else:
-                row["correctness"], row["correctness_note"] = judge_correctness(
+                row["correctness"], row["correctness_note"], c = judge_correctness(
                     cfg.judge, q["question"], q["gold_answer"], ans.text
                 )
+                judge_costs.append(c)
             if not ans.refused:
                 cited_hits = [ans.hits[n - 1] for n in ans.cited if 1 <= n <= len(ans.hits)]
-                row["faithful"], row["faithful_note"] = judge_faithfulness(cfg.judge, ans.text, cited_hits)
+                row["faithful"], row["faithful_note"], c = judge_faithfulness(cfg.judge, ans.text, cited_hits)
+                judge_costs.append(c)
             else:
                 row["faithful"] = None
+        # None if any call's model is unpriced, so a partial sum is never reported as the total.
+        row["judge_cost_usd"] = None if None in judge_costs else float(sum(judge_costs))
     return row
 
 
@@ -147,7 +152,14 @@ def summarize(rows: list[dict], k: int) -> dict[str, Any]:
     s["output_tokens_mean"] = mean([r["output_tokens"] for r in rows])
     costs = [r["cost_usd"] for r in rows if r["cost_usd"] is not None]
     s["cost_per_request_usd"] = mean(costs)
-    s["cost_total_usd"] = float(sum(costs)) if costs else float("nan")
+    s["cost_total_usd"] = float(sum(costs)) if costs else float("nan")  # answer calls only
+    if rows and "judge_cost_usd" in rows[0]:
+        jc = [r["judge_cost_usd"] for r in rows]
+        s["judge_cost_total_usd"] = float("nan") if None in jc else float(sum(jc))
+    else:
+        s["judge_cost_total_usd"] = 0.0  # --no-judge
+    # Whole eval run (answers + judge). Excludes embedding the questions.
+    s["eval_cost_total_usd"] = s["cost_total_usd"] + s["judge_cost_total_usd"]
     return s
 
 
@@ -179,6 +191,8 @@ def markdown_table(tag: str, s: dict[str, Any], config: dict[str, Any]) -> str:
         f"| Decode tokens/s (median) | {f(s['decode_tokens_per_s_median'], 1)} |",
         f"| Tokens in / out (mean) | {f(s['input_tokens_mean'], 0)} / {f(s['output_tokens_mean'], 0)} |",
         f"| Cost per request, paid rate (USD) | {f(s['cost_per_request_usd'], 6)} |",
+        f"| Eval run total: answers + judge (USD) | {f(s['cost_total_usd'], 4)} + {f(s['judge_cost_total_usd'], 4)}"
+        f" = {f(s['eval_cost_total_usd'], 4)} |",
     ]
     return "\n".join(lines) + "\n"
 
