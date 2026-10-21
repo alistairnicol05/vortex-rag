@@ -60,7 +60,7 @@ def extract_pages(pdf_path: Path) -> list[tuple[int, str]]:
     """Return [(page_number, cleaned_text), ...] for one PDF."""
     pages: list[tuple[int, str]] = []
     with pymupdf.open(pdf_path) as doc:  # "with" closes the file automatically
-        for i, page in enumerate(doc, start=1):  # count pages from 1, like a PDF viewer
+        for i, page in enumerate(doc.pages(), start=1):  # count pages from 1, like a PDF viewer
             pages.append((i, clean_text(page.get_text("text"))))  # plain text of this page only
     return pages
 
