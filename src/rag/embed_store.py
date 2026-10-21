@@ -53,7 +53,7 @@ def load_index(index_dir: Path) -> tuple[list[Chunk], np.ndarray, dict]:
 class VectorStore:
     """Thin wrapper over one Chroma collection (cosine space)."""
 
-    def __init__(self, client: chromadb.ClientAPI, name: str) -> None:
+    def __init__(self, client: ClientAPI, name: str) -> None:
         # a "collection" is like a table; "cosine" = compare vectors by angle
         self.collection = client.get_or_create_collection(name=name, metadata={"hnsw:space": "cosine"})
 
@@ -72,9 +72,14 @@ class VectorStore:
         """Return the k chunks whose vectors are closest to the question's vector, best first."""
         res = self.collection.query(query_embeddings=[vector.tolist()], n_results=k)
         hits: list[Hit] = []
+        docs, metas, dists = res["documents"], res["metadatas"], res["distances"]  # unpack the lists
         # Chroma returns lists of lists (one per query); [0] = our single query
-        for id_, doc, meta, dist in zip(res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0]):
-            hits.append(Hit(id=id_, source=meta["source"], page=int(meta["page"]), text=doc, score=1.0 - float(dist)))
+        if docs is None or metas is None or dists is None:
+            raise RuntimeError(f"Chroma returned None for docs/metas/dists: {res}")
+        
+        for id_, doc, meta, dist in zip(res["ids"][0], docs[0], metas[0], dists[0]):
+
+            hits.append(Hit(id=id_, source=str(meta["source"]), page=int(str(meta["page"])), text=doc, score=1.0 - float(dist)))
         return hits
 
     def count(self) -> int:

@@ -56,16 +56,22 @@ class GeminiEmbedder:
         """One API call: a batch of texts in, one vector per text out."""
         from google.genai import types
 
+        contents: list[types.ContentUnion]  # the type embed_content expects
         if self._is_v2:
             contents = [types.Content(parts=[types.Part.from_text(text=t)]) for t in batch]
             cfg = types.EmbedContentConfig(output_dimensionality=self.dim)
         else:
-            contents = batch
+            contents = [*batch]  # copy into a list[ContentUnion] (a list[str] variable is rejected)
             cfg = types.EmbedContentConfig(task_type=task_type, output_dimensionality=self.dim)
         res = self._client.models.embed_content(model=self.model, contents=contents, config=cfg)  # the network call
-        vecs = [list(e.values) for e in res.embeddings]
+
+        if res.embeddings is None:
+            raise RuntimeError(f"Chroma returned None for embeddings: {res}")
+        
+        vecs = [list(e.values) for e in res.embeddings if e.values is not None]  # unpack the vectors from the response
         if len(vecs) != len(batch):  # safety check: one vector per text, no more, no less
             raise RuntimeError(f"Expected {len(batch)} embeddings, got {len(vecs)}")
+        
         return vecs
 
     def _embed(self, texts: list[str], task_type: str) -> np.ndarray:
