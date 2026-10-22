@@ -50,8 +50,9 @@ class GeminiEmbedder:
         self.pause_s = pause_s  # optional wait between calls, to stay under rate limits
         self._is_v2 = self.model.startswith("gemini-embedding-2")  # v2 needs a different request format
 
-    # On error: try up to 5 times, waiting longer each time (2s, 4s, 8s, ... max 60s).
-    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=2, min=2, max=60), reraise=True)
+    # On error: try up to 6 times, waiting longer each time (2s, 4s, 8s, 16s, 32s), ~1 min in total,
+    # long enough to outlast a per-minute rate-limit window.
+    @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=2, max=60), reraise=True)
     def _call(self, batch: list[str], task_type: str) -> list[list[float]]:
         """One API call: a batch of texts in, one vector per text out."""
         from google.genai import types
@@ -79,7 +80,9 @@ class GeminiEmbedder:
         out: list[list[float]] = []
         for i in range(0, len(texts), self.batch_size):  # i = 0, 64, 128, ...
             out.extend(self._call(texts[i : i + self.batch_size], task_type))
-            if self.pause_s:
+            if len(texts) > self.batch_size:  # progress for long runs only, not single queries
+                print(f"  embedded {len(out)}/{len(texts)}", flush=True)
+            if self.pause_s and len(out) < len(texts):  # no wait needed after the last batch
                 time.sleep(self.pause_s)
         return _l2_normalize(np.asarray(out, dtype=np.float32))  # float32 halves memory vs float64
 

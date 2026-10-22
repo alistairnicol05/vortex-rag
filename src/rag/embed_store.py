@@ -4,6 +4,7 @@ so the Cloud Run container can rebuild Chroma at startup with NO API calls.
 Usage:
     python -m rag.embed_store                 # embed with Gemini, write data/index/, fill ./chroma_db
     python -m rag.embed_store --fake          # offline smoke test, fake embedder
+    python -m rag.embed_store --from-index    # refill ./chroma_db from data/index/ (no API calls)
     python -m rag.embed_store --collection chunk800 --size 800 --overlap 100   # ablation
 """
 from __future__ import annotations
@@ -110,16 +111,32 @@ def main() -> None:
     ap.add_argument("--overlap", type=int, default=s.chunk_overlap)
     ap.add_argument("--papers", type=Path, default=s.papers_dir)
     ap.add_argument("--index-dir", type=Path, default=s.index_dir)
+    # Free tier allows 100 embedded texts per minute: 50 texts every 31 s stays under it. Paid tier: --pause 0
+    ap.add_argument("--batch-size", type=int, default=50, help="texts per API call")
+    ap.add_argument("--pause", type=float, default=31.0, help="seconds to wait between API calls")
+
+    ap.add_argument("--from-index", action="store_true",
+                    help="skip PDFs and embedding; refill Chroma from the saved data/index/ files")
     args = ap.parse_args()
 
-    chunks = ingest_dir(args.papers, args.size, args.overlap, s.min_chunk_chars)  # 1. PDFs -> chunks
-    embedder: Embedder = FakeEmbedder() if args.fake else GeminiEmbedder(s)
-    print(f"Embedding {len(chunks)} chunks ...")
-    vectors = embedder.embed_documents([c.text for c in chunks])  # 2. chunks -> vectors (costs API calls)
-    model = "fake" if args.fake else s.embed_model
-    save_index(args.index_dir, chunks, vectors, model)  # 3. save portable index files
+    if args.from_index:  # reuse vectors already paid for
+        chunks, vectors, meta = load_index(args.index_dir)
+        model = meta["embed_model"]
+    else:
+        chunks = ingest_dir(args.papers, args.size, args.overlap, s.min_chunk_chars)  # 1. PDFs -> chunks
+        embedder: Embedder = (FakeEmbedder() if args.fake
+                              else GeminiEmbedder(s, batch_size=args.batch_size, pause_s=args.pause))
+        print(f"Embedding {len(chunks)} chunks ...")
+        vectors = embedder.embed_documents([c.text for c in chunks])  # 2. chunks -> vectors (costs API calls)
+        model = "fake" if args.fake else s.embed_model
+        save_index(args.index_dir, chunks, vectors, model)  # 3. save portable index files
 
-    store = open_persistent(s, args.collection)  # 4. load into the on-disk database
+    # 4. load into the on-disk database. Drop the old collection first: Chroma fixes the vector size
+    # on first insert, so a collection built with another model (e.g. --fake, 256 dims) would reject these.
+    client = chromadb.PersistentClient(path=str(s.chroma_dir))
+    if args.collection in [c.name for c in client.list_collections()]:
+        client.delete_collection(args.collection)
+    store = VectorStore(client, args.collection)
     store.add(chunks, vectors)
     print(f"Chroma collection '{args.collection}' now holds {store.count()} chunks (model={model}).")
 
