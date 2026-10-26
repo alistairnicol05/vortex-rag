@@ -41,22 +41,31 @@ class JudgeScores:
     faithful_note: str
 
 
-def judge_correctness(judge: LLM, question: str, gold: str, candidate: str) -> tuple[int, str, float | None]:
-    """Returns (score, reasoning, cost_usd). cost_usd is None if the judge model has no price."""
+def _score(text: str, key: str) -> tuple[int | None, str]:
+    """(score, reasoning) from the judge's JSON reply. A reply that cannot be read (e.g. cut off
+    mid-string) gives score None, so one bad reply skips that score instead of crashing the run."""
+    try:
+        d = parse_json(text)
+        return int(d[key]), str(d.get("reasoning", ""))
+    except (ValueError, KeyError, TypeError):  # JSONDecodeError is a ValueError
+        return None, f"judge reply unreadable: {text[:200]!r}"
+
+
+def judge_correctness(judge: LLM, question: str, gold: str, candidate: str) -> tuple[int | None, str, float | None]:
+    """Returns (score, reasoning, cost_usd). score is None if the reply is unreadable;
+    cost_usd is None if the judge model has no price."""
     prompt = f"{CORRECTNESS_RUBRIC}\n\nQUESTION: {question}\nGOLD: {gold}\nCANDIDATE: {candidate}"
     res = judge.generate(prompt, json_mode=True)
-    d = parse_json(res.text)
-    cost = llm_cost_usd(res.model, res.input_tokens, res.output_tokens)
-    return int(d["correctness"]), str(d.get("reasoning", "")), cost
+    cost = llm_cost_usd(res.model, res.input_tokens, res.output_tokens)  # the call is billed even if unreadable
+    return (*_score(res.text, "correctness"), cost)
 
 
-def judge_faithfulness(judge: LLM, candidate: str, cited_hits: list[Hit]) -> tuple[int, str, float | None]:
+def judge_faithfulness(judge: LLM, candidate: str, cited_hits: list[Hit]) -> tuple[int | None, str, float | None]:
     """Returns (score, reasoning, cost_usd). No API call (cost 0) when nothing is cited."""
     if not cited_hits:
         return 0, "no valid citations", 0.0
     ctx = "\n\n".join(f"[{h.source} p.{h.page}]\n{h.text}" for h in cited_hits)
     prompt = f"{FAITHFULNESS_RUBRIC}\n\nCANDIDATE: {candidate}\n\nCITED PASSAGES:\n{ctx}"
     res = judge.generate(prompt, json_mode=True)
-    d = parse_json(res.text)
     cost = llm_cost_usd(res.model, res.input_tokens, res.output_tokens)
-    return int(d["faithful"]), str(d.get("reasoning", "")), cost
+    return (*_score(res.text, "faithful"), cost)

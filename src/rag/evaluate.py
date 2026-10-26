@@ -139,7 +139,8 @@ def summarize(rows: list[dict], k: int) -> dict[str, Any]:
     s["multi_source_recall"] = mean([r["source_recall"] for r in multi])
     if rows and "correctness" in rows[0]:
         s["correctness_mean_0to2"] = mean([r["correctness"] for r in ans_rows])
-        s["fully_correct_rate"] = mean([float(r["correctness"] == 2) for r in ans_rows])
+        # None = the judge reply could not be read; skip it rather than count it as wrong
+        s["fully_correct_rate"] = mean([float(r["correctness"] == 2) for r in ans_rows if r["correctness"] is not None])
         s["faithful_rate"] = mean([r["faithful"] for r in ans_rows if r.get("faithful") is not None])
     s["refusal_rate_unanswerable"] = mean([float(r["refused"]) for r in un_rows])
     s["false_refusal_rate_answerable"] = mean([float(r["refused"]) for r in ans_rows])
@@ -198,7 +199,7 @@ def markdown_table(tag: str, s: dict[str, Any], config: dict[str, Any]) -> str:
 
 
 def write_spotcheck(rows: list[dict], n: int, path: Path, seed: int = 0) -> None:
-    pool = [r for r in rows if r["type"] != "unanswerable" and not r["refused"]]
+    pool = [r for r in rows if r["type"] != "unanswerable" and not r["refused"] and r.get("correctness") is not None]
     sample = random.Random(seed).sample(pool, min(n, len(pool)))
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -245,6 +246,7 @@ def main() -> None:
     ap.add_argument("--spotcheck", type=int, default=0)
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--agreement", type=Path, default=None)
+    ap.add_argument("--fresh", action="store_true", help="ignore saved progress for this --tag and start over")
     args = ap.parse_args()
 
     if args.agreement:
@@ -253,19 +255,36 @@ def main() -> None:
 
     settings = Settings(**{**s.__dict__, "hybrid": args.hybrid or s.hybrid, "collection": args.collection, "top_k": args.k})
     pipe = build_default_pipeline(settings)
-    judge = None if args.no_judge else GeminiLLM(settings, model=settings.judge_model, max_output_tokens=512)
+    # 2048, not 512: on thinking models the thinking tokens count toward this limit, and a low cap
+    # cut the judge's JSON off mid-string.
+    judge = None if args.no_judge else GeminiLLM(settings, model=settings.judge_model, max_output_tokens=2048)
     cfg = EvalConfig(k=args.k, page_tolerance=args.page_tolerance, judge=judge)
+
+    out = Path("results")
+    out.mkdir(exist_ok=True)
+    # Each finished question is appended here at once, so a crash (e.g. API outage) loses nothing.
+    # Re-running the same --tag resumes; use --fresh to start over.
+    progress = out / f"{args.tag}_progress.jsonl"
+    if args.fresh:
+        progress.unlink(missing_ok=True)
+    done = {}
+    if progress.exists():
+        done = {r["id"]: r for r in map(json.loads, progress.read_text(encoding="utf-8").splitlines()) if r}
+        print(f"Resuming '{args.tag}': {len(done)} question(s) already done (use --fresh to start over).")
 
     rows = []
     for q in load_questions(args.questions):
+        if q["id"] in done:
+            rows.append(done[q["id"]])
+            continue
         rows.append(evaluate_one(pipe, q, cfg))
+        with progress.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rows[-1], default=str) + "\n")
         print(f"[{q['id']}] {q['type']:<12} refused={rows[-1]['refused']}  {rows[-1]['total_s']:.2f}s")
 
     summary = summarize(rows, args.k)
     config = {"gen": settings.gen_model, "embed": settings.embed_model, "chunk": settings.chunk_chars,
               "overlap": settings.chunk_overlap, "k": args.k, "hybrid": settings.hybrid}
-    out = Path("results")
-    out.mkdir(exist_ok=True)
     (out / f"{args.tag}.json").write_text(json.dumps({"config": config, "summary": summary, "rows": rows}, indent=2, default=str))
     md = markdown_table(args.tag, summary, config)
     (out / f"{args.tag}.md").write_text(md, encoding="utf-8")

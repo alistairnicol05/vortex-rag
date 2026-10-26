@@ -60,7 +60,9 @@ class GeminiLLM:
         self.model = model or settings.gen_model
         self.max_output_tokens = max_output_tokens
 
-    @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=2, max=40), reraise=True)
+    # On error (e.g. 429 rate limit, 503 model overloaded): try up to 6 times, waiting 2s, 4s, 8s, 16s, 32s,
+    # ~1 min in total, long enough to outlast a per-minute rate-limit window or a short demand spike.
+    @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=2, max=60), reraise=True)
     def generate(self, prompt: str, system: str | None = None, json_mode: bool = False) -> LLMResult:
         from google.genai import types
 
