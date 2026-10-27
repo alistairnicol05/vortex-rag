@@ -270,6 +270,11 @@ prebuilt index (no PDFs, no API key), rebuilds an in-memory Chroma at startup wi
 guards (question length cap, a global rate limit of 20 requests per minute, an output token cap). It is ready
 for Cloud Run with the key supplied as a secret.
 
+- The image sets `HYBRID=1`, so the service runs the chosen configuration (hybrid search). The code default
+  (`config.py`) is off, so set `HYBRID=1` yourself when running locally without Docker.
+- `data/index/` contains paper text, so it is not in git. The image can only be built on a machine where the
+  index exists: a fresh clone must first download the papers and run `python -m rag.embed_store`.
+
 ## Limitations
 
 - **Small evaluation set:** 32 questions written by one person. Differences of one or two questions
