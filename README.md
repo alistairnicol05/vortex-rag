@@ -5,6 +5,10 @@ swirling flows, flow-induced tones and downhole flow sensing. You ask a question
 **only** from the papers, cites every claim back to a paper and page (`[S1]`, `[S2]`, ...), and replies
 "I cannot find this in the provided documents." when the papers do not contain the answer.
 
+It runs as one private Google Cloud Run service with two ways in: a cited Q&A API (`/ask`) and a
+tool-using agent built with Google's Agent Development Kit (ADK), which searches the papers itself and has a
+chat UI.
+
 Context: built to learn RAG end to end while working on a capstone (a passive vortex whistle for
 geothermal brine flow sensing). It is a learning project, not a production system.
 
@@ -22,6 +26,8 @@ geothermal brine flow sensing). It is a learning project, not a production syste
 - **Main finding:** once hybrid search fixed retrieval, answer quality did not rise with it. The remaining
   errors come mostly from the answer step (incomplete answers, refusals) and from page-level metrics that
   hide chunk-level misses (see the failure analysis).
+- **Deployment:** deployed privately on Google Cloud Run (API + ADK agent in one service), with the API key in
+  Secret Manager and hybrid search on.
 
 ## Why RAG?
 
@@ -38,7 +44,9 @@ geothermal brine flow sensing). It is a learning project, not a production syste
 PDFs -> ingest.py (PyMuPDF, page-bounded chunks) -> chunks.jsonl
      -> embed_store.py (gemini-embedding-2, 768-d) -> Chroma (cosine) + data/index export
 query -> embed -> top-k (optional BM25 + RRF hybrid) -> cited prompt -> Gemini -> answer + [S#]
-every request -> traces/requests.jsonl (stage timings, tokens, cost)
+every request -> traces/requests.jsonl (stage timings, tokens, cost; local runs only)
+
+Cloud Run service (main.py): /ask (the pipeline above)  +  ADK agent -> search_papers tool -> same retriever
 ```
 
 **Once, before any questions (`python -m rag.embed_store`):**
@@ -68,6 +76,16 @@ top 20, and they are merged with reciprocal rank fusion (RRF): each chunk scores
 `1/(60 + rank in meaning list) + 1/(60 + rank in keyword list)`. Chunks that both searches like rise to the top.
 Keyword search runs locally, so it adds no API cost.
 
+**The ADK agent** (`agents/vortex_agent/`). The `/ask` pipeline always does one search and one answer. The agent
+is given the retriever as a tool (`search_papers(query, k)`, k = 1–8) and decides for itself what to search
+for and how many times, e.g. once per topic for a comparison. It is instructed to answer only from passages
+the tool returns, cite them as (source, page), and say when the papers do not contain the answer. It uses the
+same answer model (`gemini-3.1-flash-lite`) and, inside the deployed service, the same in-memory index as
+`/ask`. A manual test of three questions (one paper, a comparison, an unanswerable one) gave correct, cited
+answers and a correct refusal. With meaning-only search it could not find "Munich TH3" for the comparison;
+with `HYBRID=1` it found it (cable cemented behind the casing to about 650 m), the same pattern as the
+evaluation. The agent was tested by hand only; the evaluation numbers below are for `/ask`.
+
 ## Models and settings
 
 | Role | Model / value | Why |
@@ -77,7 +95,9 @@ Keyword search runs locally, so it adds no API cost.
 | Judge model | `gemini-3.6-flash` | A different, stronger model than the answer model, to limit a model grading its own work. Default in code is `gemini-3.8-flash`, which was repeatedly overloaded (503 errors), so the judge is set with `JUDGE_MODEL=gemini-3.6-flash` in `.env` |
 | Chunking | 1,200 characters, 200 overlap, page-bounded | Roughly one paragraph per chunk: specific enough to match a question sharply, small enough that 5 fit cheaply in a prompt |
 | k | 5 passages per question | Best balance of answer faithfulness and cost in the evaluation below |
-| Vector store | Chroma, cosine distance, collection `papers` | Simple local persistent store |
+| Retrieval | Hybrid (BM25 + RRF) when `HYBRID=1` | Chosen in the evaluation below. The code default is off, so set `HYBRID=1` in `.env`; the Docker image sets it |
+| Vector store | Chroma, cosine distance, collection `papers` | Persistent on disk (`./chroma_db`) locally; rebuilt in memory from `data/index/` in the deployed service |
+| Agent | Google ADK 2.13, `gemini-3.1-flash-lite` | Tool-using agent over the same retriever |
 
 ## Quickstart (Windows PowerShell, Python 3.12)
 
@@ -86,13 +106,25 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 $env:PYTHONPATH = "src"            # needed in every new terminal
-Copy-Item .env.example .env        # then paste your GEMINI_API_KEY and add JUDGE_MODEL=gemini-3.6-flash
+Copy-Item .env.example .env        # then fill it in (see below)
 python scripts\download_papers.py
 python -m rag.ingest               # optional: writes data\index\chunks.jsonl so you can inspect the chunks
 python -m rag.embed_store          # re-chunks, embeds (paid API calls) and fills Chroma + data\index
 python -m rag.embed_store --from-index   # alternative: refill Chroma from data\index (no API calls)
 python -m rag.query "How does vortex whistle frequency depend on flow velocity?"
 python -m rag.query "..." --k 8 --hybrid # variants
+
+adk run agents/vortex_agent        # chat with the agent in the terminal
+uvicorn main:app --port 8080       # the full service: http://localhost:8080/dev-ui/ (agent chat) and POST /ask
+```
+
+`.env` (git-ignored, never commit it):
+
+```
+GEMINI_API_KEY=your-key            # used by the RAG code
+GOOGLE_API_KEY=your-key            # the same key; ADK looks for this name
+JUDGE_MODEL=gemini-3.6-flash       # the code default (gemini-3.8-flash) was often overloaded
+HYBRID=1                           # the chosen retrieval configuration
 ```
 
 A paid Gemini API key is recommended (see "Development log": the free tier allows only about 20 requests per
@@ -118,8 +150,8 @@ wording. After the first run, alternate gold pages were added by hand for four q
 ### Metrics
 
 Run with `python -m rag.evaluate --tag <name> [--k 8] [--hybrid] [--spotcheck 10] [--plot]`.
-Each run writes `results/<tag>.json` (every question's details), `results/<tag>.md` (summary table) and
-`results/<tag>_progress.jsonl` (checkpoint for resuming).
+Each run writes `results/<tag>.md` (summary table), `results/<tag>_progress.jsonl` (every question's details,
+also the checkpoint for resuming) and `results/<tag>.json` (summary plus details; git-ignored, local only).
 
 | Metric | Meaning |
 |---|---|
@@ -261,19 +293,57 @@ hybrid runs is this effect rather than real invented content.
 | q07 was graded wrong, and the gold answer looked suspect | The value 0.61 is written as S_c = 0.61 in the abstract and is easy to miss; the system's 0.73 came from a different paper | Checked both papers: the gold answer is correct. The question was kept unchanged (changing a test after seeing results would be tuning to the test) and documented as failure #1. |
 | A gold-page anchor for P06 was not found | P05, P06 and P08 store "fl"/"fi" as single ligature characters (ﬂ, ﬁ), so "flow" in the text is "ﬂow" | Fixed the anchor text. The ligatures remain in the index (see Limitations). |
 | Printing chunk text failed with `UnicodeEncodeError` on Windows | The Windows console uses cp1252 | Write output to a UTF-8 file, or set `PYTHONIOENCODING=utf-8`. |
+| The deployed service would have used meaning-only search | `HYBRID` defaults to off in `config.py`, and the first Dockerfile did not set it | The Dockerfile sets `HYBRID=1`, so the service runs the configuration chosen in the evaluation. |
+| The ADK agent only worked on my laptop | It opened the on-disk `./chroma_db`, which is not in the container | The agent loads from `data/index/` like the API, and inside the service it reuses the API's already-loaded pipeline, so the index is in memory once. |
+| `pip` reported an OpenTelemetry version conflict after installing ADK | ADK requires `opentelemetry-sdk` ≤ 1.44, but ChromaDB had already pulled in a 1.45.1 exporter | Pinned `opentelemetry-exporter-otlp-proto-grpc==1.44.0` in `requirements.txt`, so ADK and ChromaDB share one environment (no separate venv needed). |
+| `uvicorn main:app` failed: attribute "app" not found | `main.py` had been created but saved empty | Added the code: one FastAPI app that serves the ADK agent and adds `/ask` and `/healthz`. |
+| Cloud Run build failed with `PERMISSION_DENIED` | New projects no longer give the default compute service account the permissions a source build needs (it could not read the uploaded source) | Granted that service account `roles/run.builder`. |
+| The deployed chat UI said "Failed to create session" (HTTP 403) | Through `gcloud run services proxy`, the browser's Origin is `localhost:8080` but the request reaches the `run.app` host. ADK's cross-site protection blocked the mismatch ("origin not allowed") | `main.py` passes `allow_origins` for `localhost:8080` and `127.0.0.1:8080`. Safe because the service is private; other origins are still blocked. |
+| `/healthz` returns 404 on Cloud Run | Cloud Run reserves some paths ending in `z` | Not an app error: it works locally, and Cloud Run checks container health itself. |
+| ADK's local chat history (`agents/vortex_agent/.adk/session.db`) was committed | `adk run` saves sessions inside the agent folder | Removed from git and added `.adk/` to `.gitignore`, `.gcloudignore` and `.dockerignore`. It held only test chats. |
 
 ## Deployment
 
-Not publicly deployed, to respect paper copyright and avoid uncontrolled API costs. The project runs locally.
-A FastAPI service (`src/rag/app.py`) and a `Dockerfile` are included: the image contains the code and the
-prebuilt index (no PDFs, no API key), rebuilds an in-memory Chroma at startup with no API calls, and has cost
-guards (question length cap, a global rate limit of 20 requests per minute, an output token cap). It is ready
-for Cloud Run with the key supplied as a secret.
+Deployed **privately** on Google Cloud Run (project `vortex-rag-ali`, region `us-central1`, service
+`vortex-rag-agent`). It is not public, to respect paper copyright and control API cost: only Google accounts
+with access to the project can reach it, so opening the service URL directly shows "Forbidden".
 
-- The image sets `HYBRID=1`, so the service runs the chosen configuration (hybrid search). The code default
-  (`config.py`) is off, so set `HYBRID=1` yourself when running locally without Docker.
+- **One service, two ways in.** `main.py` builds the ADK web app (agent API and chat UI at `/dev-ui/`) and adds
+  the RAG API (`POST /ask`, `GET /healthz`).
+- **Image** (`Dockerfile`): the code, the agent and the prebuilt index (`data/index/`); no PDFs and no API key.
+  At startup it rebuilds an in-memory Chroma from the index with no API calls (the log shows
+  `index loaded: 827 chunks`). It sets `HYBRID=1`.
+- **Secrets:** the Gemini key is stored in Secret Manager (`gemini-api-key`) and given to the container as
+  both `GEMINI_API_KEY` and `GOOGLE_API_KEY`.
+- **Cost guards:** private access, at most 2 instances, and scale to zero when idle (no cost when unused).
+  `/ask` also caps question length (500 characters), answer length (600 tokens) and rate (20 requests per minute).
+  The agent can make several model calls per question, so it costs a little more than `/ask`.
+- **Verified:** `/ask` returned a correct cited answer in about 1.5 s for $0.0005, and the agent chat works
+  through the proxy.
+
+### Using and redeploying
+
+```powershell
+# Use it: open a signed-in tunnel, leave it running, then open http://localhost:8080/dev-ui/ or POST to /ask
+gcloud run services proxy vortex-rag-agent --region us-central1 --project vortex-rag-ali --port 8080
+
+# Redeploy after changing code or the index (uploads the folder as it is on this machine; about 3-5 min)
+gcloud run deploy vortex-rag-agent --source . --region us-central1 --project vortex-rag-ali --no-allow-unauthenticated --max-instances 2 --memory 1Gi --update-secrets "GEMINI_API_KEY=gemini-api-key:latest,GOOGLE_API_KEY=gemini-api-key:latest"
+
+# Turn it off
+gcloud run services delete vortex-rag-agent --region us-central1 --project vortex-rag-ali
+```
+
+```powershell
+# Test /ask through the proxy
+Invoke-RestMethod http://localhost:8080/ask -Method Post -ContentType "application/json" -Body '{"question": "How does vortex whistle sound power depend on frequency?"}' | ConvertTo-Json -Depth 5
+```
+
 - `data/index/` contains paper text, so it is not in git. The image can only be built on a machine where the
   index exists: a fresh clone must first download the papers and run `python -m rag.embed_store`.
+- `.gcloudignore` (used by `--source` uploads) deliberately does **not** exclude `data/index/`; it excludes
+  `.env`, the PDFs, `chroma_db/`, results and tests.
+- New key: add a secret version (`gcloud secrets versions add gemini-api-key --data-file=<file>`), then redeploy.
 
 ## Limitations
 
@@ -289,6 +359,8 @@ for Cloud Run with the key supplied as a secret.
   extra gold-answer detail, and its faithfulness check penalises names repeated from the question.
 - **Refusal sensitivity:** the answer model sometimes refuses when the answer is present, depending on the
   order and mix of passages.
+- **Agent not benchmarked:** the ADK agent was tested by hand on a few questions; the 32-question evaluation
+  measures `/ask` only.
 - Papers are not redistributed here; `scripts/download_papers.py` fetches them from their open-access hosts.
 
 ## Future work
@@ -298,16 +370,20 @@ for Cloud Run with the key supplied as a secret.
 - Adjust the prompt to ask for all quantitative details, to reduce "correct but incomplete" answers.
 - Run a no-retrieval comparison (the same questions answered by the plain model) to measure what RAG adds.
 - Grow the question set and spot-check more answers for stronger conclusions.
+- Run the evaluation through the agent as well, and add a second "reviewer" agent that checks answers against
+  the cited passages.
 
 ## Layout
 
 ```
-src/rag/       config, ingest, embeddings, embed_store, retrieve, llm, query, judge, evaluate, app, trace, pricing
-scripts/       download_papers.py, locate_pages.py
-data/          papers.csv (committed), papers/ (ignored), index/ (built)
-eval/          questions.jsonl
-results/       <tag>.json, <tag>.md, <tag>_progress.jsonl, baseline_spotcheck.csv
-traces/        requests.jsonl (every request: retrieved chunk ids, timings, tokens, cost)
-tests/         offline tests (fake embedder + stub LLM)
-vortex_agent/  optional Google ADK agent (separate venv)
+src/rag/              config, ingest, embeddings, embed_store, retrieve, llm, query, judge, evaluate, app, trace, pricing
+agents/vortex_agent/  Google ADK agent with the retriever as its search_papers tool
+main.py               Cloud Run entry point: ADK web app + /ask and /healthz
+Dockerfile            image for Cloud Run (code, agent, prebuilt index; HYBRID=1)
+scripts/              download_papers.py, locate_pages.py
+data/                 papers.csv (committed), papers/ (ignored), index/ (built, ignored)
+eval/                 questions.jsonl
+results/              <tag>.md, <tag>_progress.jsonl, baseline_spotcheck.csv (<tag>.json ignored)
+traces/               requests.jsonl, ignored (every local request: retrieved chunk ids, timings, tokens, cost)
+tests/                offline tests (fake embedder + stub LLM)
 ```
