@@ -17,7 +17,7 @@ geothermal brine flow sensing). It is a learning project, not a production syste
   and the model never cited a passage that does not exist.
 - **Judge check:** my own grading agreed with the automatic judge on **9 of 10** sampled answers
   (**10 of 10 within one point**).
-- **Cost:** about **$0.0005 per question** (half a tenth of a cent). Each full 32-question evaluation run,
+- **Cost:** about **$0.0005 per question**. Each full 32-question evaluation run,
   including the judge, cost about $0.08–0.13.
 - **Main finding:** once hybrid search fixed retrieval, answer quality did not rise with it. The remaining
   errors come mostly from the answer step (incomplete answers, refusals) and from page-level metrics that

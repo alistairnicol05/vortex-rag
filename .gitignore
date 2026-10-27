@@ -13,5 +13,4 @@ data/papers/*.part
 data/index/
 results/*.json
 smoke.py
-locate_pages.py
 questions_draft.jsonl
